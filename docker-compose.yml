@@ -1,0 +1,21 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"   # FastAPI backend
+      - "8501:8501"   # Streamlit UI (optional, override command)
+    volumes:
+      # Mount the QLoRA adapter weights at runtime so retraining is reflected without rebuild
+      - ./artifacts:/app/artifacts
+    environment:
+      - BASE_MODEL_ID=codellama/CodeLlama-7b-Instruct-hf
+      - ADAPTER_PATH=artifacts/qlora_adapter
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    # Default: run FastAPI API. Override command to launch Streamlit UI instead:
+    #   docker compose run --service-ports app streamlit run ui/streamlit_app.py --server.port 8501
