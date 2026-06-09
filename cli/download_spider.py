@@ -21,10 +21,7 @@ from pathlib import Path
 
 import requests
 
-try:
-    from core.dataset import convert_spider_dataset
-except Exception:  # pragma: no cover - allows running as a module
-    from core.dataset import convert_spider_dataset
+from core.dataset import convert_spider_dataset
 
 try:
     gdown = importlib.import_module("gdown")
@@ -90,6 +87,7 @@ def _extract_archive(archive_path: Path, spider_root: Path) -> None:
         member_names = archive.namelist()
         logger.info("Archive contains %s entries", len(member_names))
 
+        # ── Extract JSON metadata files ──
         needed_members: dict[str, str] = {}
         for member_name in member_names:
             if member_name.endswith("/"):
@@ -107,6 +105,33 @@ def _extract_archive(archive_path: Path, spider_root: Path) -> None:
             logger.info("Extracting %s -> %s", member_name, target_path)
             with archive.open(member_name, "r") as source, target_path.open("wb") as target:
                 target.write(source.read())
+
+        # ── Extract SQLite databases (needed for execution accuracy) ──
+        database_members = [
+            m for m in member_names
+            if "/database/" in m and m.endswith(".sqlite")
+        ]
+        if database_members:
+            logger.info("Extracting %d SQLite databases …", len(database_members))
+            for member_name in database_members:
+                # e.g. "spider/database/employees/employees.sqlite" -> "spider/database/employees/employees.sqlite"
+                rel = member_name
+                # Strip leading directory components until we get "database/..."
+                parts = Path(member_name).parts
+                try:
+                    db_idx = parts.index("database")
+                    rel_path = Path(*parts[db_idx:])
+                except ValueError:
+                    rel_path = Path(member_name).name
+
+                target_path = spider_root / rel_path
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                if not target_path.exists():
+                    with archive.open(member_name, "r") as source, target_path.open("wb") as target:
+                        target.write(source.read())
+            logger.info("Database extraction complete")
+        else:
+            logger.warning("No SQLite databases found in archive")
 
     missing = [name for name in ("tables.json", "train_spider.json", "dev.json") if not (spider_root / name).exists()]
     if missing:
@@ -131,11 +156,14 @@ def _copy_if_needed(source: Path, destination: Path) -> None:
     shutil.copy2(source, destination)
 
 
-def download_spider_dataset(spider_root: Path) -> None:
+def download_spider_dataset(spider_root: Path, force: bool = False) -> None:
     spider_root.mkdir(parents=True, exist_ok=True)
 
     expected_files = [spider_root / "tables.json", spider_root / "train_spider.json", spider_root / "dev.json"]
-    if all(path.exists() for path in expected_files):
+    db_dir = spider_root / "database"
+    databases_present = db_dir.exists() and any(db_dir.iterdir())
+
+    if all(path.exists() for path in expected_files) and databases_present and not force:
         logger.info("Spider dataset already present under %s", spider_root)
         return
 

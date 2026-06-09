@@ -1,6 +1,33 @@
+# Virtual environments
 venv/
 .venv/
+
+# Python cache
 __pycache__/
 *.pyc
+*.pyo
+.pytest_cache/
+
+# Dataset (regenerable via python -m cli.download_spider)
+spider/
+converted_spider/
+
+# Training artifacts / model downloads
 artifacts/
 artifacts_backup/
+.cache/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# Python packaging
+*.egg-info/
+dist/
+build/

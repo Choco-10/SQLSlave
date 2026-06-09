@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 import requests
 import streamlit as st
 
@@ -15,7 +17,7 @@ st.set_page_config(
 st.title("Text-to-SQL Generator")
 st.write("Define schema with PK/FK constraints and generate SQL from natural language.")
 
-BACKEND_URL = "http://127.0.0.1:8000/generate"
+BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000") + "/generate"
 
 
 # -----------------------------
@@ -263,6 +265,15 @@ if st.button("Generate SQL", type="primary"):
 
         if res.ok:
             st.subheader("SQL")
-            st.code(res.json().get("sql", ""), language="sql")
+            st.markdown("""
+            <style>
+            [data-testid="stCode"] pre {
+                padding-top: 50px !important;
+                padding-right: 50px !important;
+            }
+            </style>
+            """, unsafe_allow_html=True)
+            sql = res.json().get("sql", "")
+            st.code(sql, language="sql")
         else:
             st.error(res.text)

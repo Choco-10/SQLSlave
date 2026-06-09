@@ -55,6 +55,12 @@ def format_eta(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}"
 
 
+def count_lines(path: str) -> int:
+    """Count the number of lines in a file efficiently."""
+    with open(path, "r", encoding="utf-8") as f:
+        return sum(1 for _ in f)
+
+
 def evaluate(model_path: str, data_path: str):
     print("\nLoading model...\n")
 
@@ -63,6 +69,7 @@ def evaluate(model_path: str, data_path: str):
         adapter_path="artifacts/qlora_adapter"
     )
 
+    total_samples = count_lines(data_path)
     total = 0
     correct = 0
 
@@ -87,7 +94,7 @@ def evaluate(model_path: str, data_path: str):
         now = time.time()
         elapsed = now - start_time
         avg_time = elapsed / total
-        remaining = avg_time * (1034 - total)  # assumes ~1034 max
+        remaining = avg_time * (total_samples - total)
 
         acc = (correct / total) * 100
 
