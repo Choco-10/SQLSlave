@@ -49,7 +49,6 @@ def _download_google_drive_file(file_id: str, destination: Path) -> None:
             return
         raise RuntimeError("gdown did not produce a downloadable Spider archive")
 
-    # Fallback for environments without gdown installed.
     session = requests.Session()
     response = session.get(
         GOOGLE_DRIVE_DOWNLOAD_URL,
@@ -87,7 +86,6 @@ def _extract_archive(archive_path: Path, spider_root: Path) -> None:
         member_names = archive.namelist()
         logger.info("Archive contains %s entries", len(member_names))
 
-        # ── Extract JSON metadata files ──
         needed_members: dict[str, str] = {}
         for member_name in member_names:
             if member_name.endswith("/"):
@@ -106,7 +104,6 @@ def _extract_archive(archive_path: Path, spider_root: Path) -> None:
             with archive.open(member_name, "r") as source, target_path.open("wb") as target:
                 target.write(source.read())
 
-        # ── Extract SQLite databases (needed for execution accuracy) ──
         database_members = [
             m for m in member_names
             if "/database/" in m and m.endswith(".sqlite")
@@ -114,9 +111,7 @@ def _extract_archive(archive_path: Path, spider_root: Path) -> None:
         if database_members:
             logger.info("Extracting %d SQLite databases …", len(database_members))
             for member_name in database_members:
-                # e.g. "spider/database/employees/employees.sqlite" -> "spider/database/employees/employees.sqlite"
                 rel = member_name
-                # Strip leading directory components until we get "database/..."
                 parts = Path(member_name).parts
                 try:
                     db_idx = parts.index("database")

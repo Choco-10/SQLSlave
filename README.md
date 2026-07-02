@@ -1,6 +1,6 @@
 # SQLSlave
 
-You ask a question in plain English, describe your database tables and columns, and SQLSlave generates the SQL query for you. It uses a CodeLlama-7B-Instruct model fine-tuned on the Spider text-to-SQL dataset with QLoRA.
+You ask a question in plain English, describe your database tables and columns, and SQLSlave generates the SQL query for you. It uses a DeepSeek-Coder-6.7B-Instruct model fine-tuned on the Spider text-to-SQL dataset with QLoRA.
 
 ## Setup
 
@@ -37,10 +37,10 @@ Optional flags: `--num-train-epochs`, `--learning-rate`, `--eval-steps`.
 ## Evaluate
 
 ```powershell
-python -m cli.eval
+python -m cli.eval_accuracy
 ```
 
-Runs exact-match accuracy on the validation set.
+Runs execution and exact-match accuracy on the validation set.
 
 ## Serve
 
@@ -68,7 +68,7 @@ curl -X POST http://127.0.0.1:8000/generate -H "Content-Type: application/json" 
 
 ### Prerequisites
 
-- [Docker Desktop](https://www.docker.com/products/docker-desktop/) with **WSL 2 backend**
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/)
 - [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) for GPU passthrough
 
 ### Build
@@ -106,5 +106,5 @@ The QLoRA adapter is saved to `artifacts/qlora_adapter/` — this directory is *
 Set environment variables to use a different base model or adapter path:
 
 ```powershell
-docker compose run -e BASE_MODEL_ID="codellama/CodeLlama-7b-Instruct-hf" -e ADAPTER_PATH="artifacts/qlora_adapter" app
+docker compose run -e BASE_MODEL_ID="deepseek-ai/deepseek-coder-6.7b-instruct" -e ADAPTER_PATH="artifacts/qlora_adapter" app
 ```

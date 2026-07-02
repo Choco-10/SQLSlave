@@ -1,37 +1,28 @@
-# Virtual environments
 venv/
 .venv/
 
-# Python cache
 __pycache__/
 *.pyc
 *.pyo
 .pytest_cache/
 
-# Git
 .git/
 .gitignore
 
-# Docker files (prevent recursive copying)
 Dockerfile
 docker-compose.yml
 .dockerignore
 
-# IDE / editor
 .vscode/
 .idea/
 *.swp
 *.swo
 
-# OS artifacts
 .DS_Store
 Thumbs.db
 
-# Large/backup artifacts — mounted at runtime, not baked in
 
 artifacts_backup/
-# Dataset raw files (not needed for serving)
 spider/
 
-# Model download cache (will be downloaded at runtime)
 .cache/

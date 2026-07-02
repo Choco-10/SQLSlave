@@ -23,16 +23,15 @@ class GenerateResponse(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    # Startup
-    base_model_id = os.getenv("BASE_MODEL_ID", "codellama/CodeLlama-7b-Instruct-hf")
-    adapter_path = os.getenv("ADAPTER_PATH", "artifacts/qlora_adapter/checkpoint-1750")
+    base_model_id = os.getenv("BASE_MODEL_ID", "deepseek-ai/deepseek-coder-6.7b-instruct")
+    adapter_path = os.getenv("ADAPTER_PATH", "artifacts/qlora_adapter")
 
     if adapter_path and os.path.exists(adapter_path):
         app.state.generator = load_sql_generator(base_model_id, adapter_path)
     else:
         app.state.generator = load_sql_generator(base_model_id)
     yield
-    # Shutdown (no cleanup needed)
+
 
 
 app = FastAPI(title="Text-to-SQL Generator", lifespan=lifespan)

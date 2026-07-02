@@ -20,9 +20,6 @@ st.write("Define schema with PK/FK constraints and generate SQL from natural lan
 BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000") + "/generate"
 
 
-# -----------------------------
-# STATE INIT
-# -----------------------------
 def _init_schema_state() -> None:
     if "schema_table_ids" not in st.session_state:
         st.session_state.schema_table_ids = []
@@ -45,9 +42,6 @@ def _ensure_table_column_state(table_id: int) -> None:
         st.session_state.schema_table_next_column_id[table_id] = 1
 
 
-# -----------------------------
-# TABLE / COLUMN MANAGEMENT
-# -----------------------------
 def _add_schema_table() -> None:
     table_id = st.session_state.schema_next_id
     st.session_state.schema_next_id += 1
@@ -75,6 +69,7 @@ def _remove_schema_column(table_id: int, column_id: int) -> None:
 
     for key in [
         f"column_name_{table_id}_{column_id}",
+        f"type_{table_id}_{column_id}",
         f"pk_{table_id}_{column_id}",
         f"fk_enabled_{table_id}_{column_id}",
         f"fk_table_{table_id}_{column_id}",
@@ -96,9 +91,6 @@ def _remove_schema_table(table_id: int) -> None:
     st.session_state.schema_table_next_column_id.pop(table_id, None)
 
 
-# -----------------------------
-# BUILD SCHEMA
-# -----------------------------
 def _build_schema_payload():
     schema = []
 
@@ -115,6 +107,7 @@ def _build_schema_payload():
                 continue
 
             pk = st.session_state.get(f"pk_{table_id}_{cid}", False)
+            col_type = st.session_state.get(f"type_{table_id}_{cid}", "text")
 
             fk_enabled = st.session_state.get(f"fk_enabled_{table_id}_{cid}", False)
             fk_table = st.session_state.get(f"fk_table_{table_id}_{cid}")
@@ -124,7 +117,7 @@ def _build_schema_payload():
             if fk_enabled and fk_table and fk_column:
                 fk = (fk_table, fk_column)
 
-            columns[col] = {"pk": pk, "fk": fk}
+            columns[col] = {"pk": pk, "fk": fk, "type": col_type}
 
         if table_name or columns:
             schema.append({"name": table_name, "columns": columns})
@@ -132,9 +125,6 @@ def _build_schema_payload():
     return schema
 
 
-# -----------------------------
-# INIT
-# -----------------------------
 _init_schema_state()
 
 question = st.text_area(
@@ -144,9 +134,6 @@ question = st.text_area(
 )
 
 
-# -----------------------------
-# UI
-# -----------------------------
 st.subheader("Schema Builder")
 
 for table_id in list(st.session_state.schema_table_ids):
@@ -170,18 +157,25 @@ for table_id in list(st.session_state.schema_table_ids):
         st.markdown("Columns")
 
         for cid in list(st.session_state.schema_table_column_ids[table_id]):
-            c1, c2, c3, c4, c5 = st.columns([4, 1, 1, 3, 1])
+            c1, c2, c3, c4, c5, c6 = st.columns([3, 2, 1, 1, 3, 1])
 
             c1.text_input(
                 "Column",
                 key=f"column_name_{table_id}_{cid}",
-                placeholder="",
+                placeholder="column_name",
                 label_visibility="collapsed"
             )
 
-            c2.checkbox("PK", key=f"pk_{table_id}_{cid}")
+            c2.selectbox(
+                "Type",
+                options=["text", "number", "time", "boolean", "others"],
+                key=f"type_{table_id}_{cid}",
+                label_visibility="collapsed"
+            )
 
-            fk_enabled = c3.checkbox("FK", key=f"fk_enabled_{table_id}_{cid}")
+            c3.checkbox("PK", key=f"pk_{table_id}_{cid}")
+
+            fk_enabled = c4.checkbox("FK", key=f"fk_enabled_{table_id}_{cid}")
 
             if fk_enabled:
                 tables = [
@@ -190,7 +184,7 @@ for table_id in list(st.session_state.schema_table_ids):
                 ]
                 tables = [t for t in tables if t]
 
-                fk_table = c4.selectbox(
+                fk_table = c5.selectbox(
                     "Table",
                     tables if tables else ["(none)"],
                     key=f"fk_table_{table_id}_{cid}"
@@ -207,16 +201,15 @@ for table_id in list(st.session_state.schema_table_ids):
                             pk_cols.append(cname)
 
                 if pk_cols:
-                    c4.selectbox(
+                    c5.selectbox(
                         "Ref",
                         pk_cols,
                         key=f"fk_column_{table_id}_{cid}"
                     )
                 else:
-                    c4.caption("No PK found")
+                    c5.caption("No PK found")
 
-            # aligned delete button (right-most narrow column)
-            if c5.button("❌", key=f"rm_col_{table_id}_{cid}"):
+            if c6.button("❌", key=f"rm_col_{table_id}_{cid}"):
                 _remove_schema_column(table_id, cid)
                 st.rerun()
 
@@ -230,9 +223,6 @@ if st.button("Add table"):
     st.rerun()
 
 
-# -----------------------------
-# PREVIEW
-# -----------------------------
 st.divider()
 st.subheader("Schema Preview")
 
@@ -249,9 +239,6 @@ for t in schema:
     st.dataframe(rows, width="stretch")
 
 
-# -----------------------------
-# GENERATE
-# -----------------------------
 if st.button("Generate SQL", type="primary"):
     if not question.strip():
         st.error("Enter a question.")

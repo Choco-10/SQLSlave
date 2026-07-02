@@ -3,14 +3,21 @@ from __future__ import annotations
 import argparse
 import os
 import math
-import re
 import sys
 
 if not sys.flags.utf8_mode and os.environ.get("SQLSLAVE_UTF8_BOOTSTRAPPED") != "1":
+    import subprocess
     os.environ["SQLSLAVE_UTF8_BOOTSTRAPPED"] = "1"
-    os.execv(sys.executable, [sys.executable, "-X", "utf8", os.path.abspath(__file__), *sys.argv[1:]])
+    sys.exit(subprocess.call([sys.executable, "-X", "utf8", "-m", "cli.train", *sys.argv[1:]]))
+
+
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "garbage_collection_threshold:0.6,max_split_size_mb:128"
 
 import torch
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+torch.backends.cuda.enable_math_sdp(False)
+
 from datasets import load_dataset
 from peft import LoraConfig, prepare_model_for_kbit_training
 from transformers import (
@@ -21,47 +28,60 @@ from transformers import (
     TrainerCallback,
 )
 from trl import SFTConfig, SFTTrainer
+from transformers.data.data_collator import DataCollatorMixin
 
 from core.dataset import convert_spider_dataset
+from core.model import load_corrected_tokenizer
 
 
-_PROMPT_MARKER = "SQL:[/INST]"
-
-
-def _extract_prompt_and_sql(text: str) -> tuple[str, str]:
-    if _PROMPT_MARKER not in text:
-        return text.strip(), ""
-
-    prompt, sql = text.split(_PROMPT_MARKER, 1)
-    return f"{prompt}{_PROMPT_MARKER}", sql.strip()
-
-
-def _normalize_sql_for_exact_match(text: str) -> str:
-    cleaned = text.strip()
-    cleaned = re.sub(r"^```(?:sql)?", "", cleaned, flags=re.IGNORECASE).strip()
-    cleaned = re.sub(r"```$", "", cleaned).strip()
-    cleaned = cleaned.rstrip(";")
-    cleaned = cleaned.lower()
-    cleaned = re.sub(r"\s+", " ", cleaned)
-    cleaned = re.sub(r"\s*([(),.=<>+\-/*])\s*", r"\1", cleaned)
-    return cleaned.strip()
-
-
-# =========================================================
-# TRAINING CALLBACK WITH TABULAR LOGGING
-# =========================================================
-class TerminalAnalyticsCallback(TrainerCallback):
-    def __init__(
-        self,
-        tokenizer,
-        eval_dataset,
-        exact_match_max_new_tokens: int,
-        log_metrics: list[str],
-    ) -> None:
+class CompletionOnlyDataCollator(DataCollatorMixin):
+    def __init__(self, tokenizer, response_template="### Response:\n", pad_to_multiple_of=8):
         self.tokenizer = tokenizer
-        self.eval_dataset = eval_dataset
-        self.exact_match_max_new_tokens = exact_match_max_new_tokens
-        self.log_metrics = log_metrics
+        self.response_template = response_template
+        self.pad_to_multiple_of = pad_to_multiple_of
+        self.response_token_ids = tokenizer.encode(response_template, add_special_tokens=False)
+        self.return_tensors = "pt"
+
+    def torch_call(self, examples):
+        input_ids = [torch.tensor(ex["input_ids"]) for ex in examples]
+        labels = [ids.clone() for ids in input_ids]
+        
+        for i in range(len(examples)):
+            ids = input_ids[i].tolist()
+            lbl = labels[i]
+            
+            found = False
+            n_template = len(self.response_token_ids)
+            for idx in range(len(ids) - n_template + 1):
+                if ids[idx : idx + n_template] == self.response_token_ids:
+                    lbl[: idx + n_template] = -100
+                    found = True
+                    break
+            
+        max_len = max(len(ids) for ids in input_ids)
+        if self.pad_to_multiple_of is not None:
+            max_len = ((max_len + self.pad_to_multiple_of - 1) // self.pad_to_multiple_of) * self.pad_to_multiple_of
+            
+        padded_input_ids = []
+        padded_labels = []
+        attention_masks = []
+        
+        for ids, lbl in zip(input_ids, labels):
+            pad_len = max_len - len(ids)
+            padded_input_ids.append(torch.cat([ids, torch.full((pad_len,), self.tokenizer.pad_token_id, dtype=torch.long)]))
+            padded_labels.append(torch.cat([lbl, torch.full((pad_len,), -100, dtype=torch.long)]))
+            mask = torch.cat([torch.ones(len(ids), dtype=torch.long), torch.zeros(pad_len, dtype=torch.long)])
+            attention_masks.append(mask)
+            
+        return {
+            "input_ids": torch.stack(padded_input_ids),
+            "labels": torch.stack(padded_labels),
+            "attention_mask": torch.stack(attention_masks),
+        }
+
+
+class TerminalAnalyticsCallback(TrainerCallback):
+    def __init__(self) -> None:
         self._start_time = 0.0
         self._last_header_step = -100
 
@@ -104,12 +124,9 @@ class TerminalAnalyticsCallback(TrainerCallback):
 
         step = logs.get("step", state.global_step)
 
-        # Skip logging eval entries here — they are handled by on_evaluate
         if "eval_loss" in logs:
             return
 
-        # ── TRAIN log entry ──
-        # Re-print table header every 10 steps so it stays visible
         if step - self._last_header_step >= 10:
             self._print_train_header(step)
 
@@ -126,7 +143,6 @@ class TerminalAnalyticsCallback(TrainerCallback):
         max_steps = state.max_steps or 1
         pct = min(step / max_steps * 100, 100.0)
 
-        # Compute ETA
         elapsed = time.time() - self._start_time
         steps_done = step
         steps_remaining = max_steps - step
@@ -140,110 +156,54 @@ class TerminalAnalyticsCallback(TrainerCallback):
         print(f"{'Step':<6} | {'Event':<7} | {'Value':<22} | {'Progress':<24}")
         print("-" * 80)
 
-        # EVAL row
         eval_loss = metrics.get("eval_loss")
         eval_loss_str = f"{eval_loss:.4f}" if eval_loss is not None else ""
         print(f"{str(step):<6} | {'EVAL':<7} | {eval_loss_str:<22} | {self._progress_bar(pct)}")
 
         print("=" * 80)
 
-        # Reset so next train log re-prints its header
         self._last_header_step = -100
 
     def on_train_end(self, args, state, control, **kwargs):
-        import time
         step = state.global_step
         max_steps = state.max_steps or 1
-        pct = 100.0
-
         print(f"\n  Training finished at step {step}/{max_steps or 'N/A'}")
-        print(f"\n  Running final exact match on full validation dataset ({len(self.eval_dataset)} samples)...")
-
-        model = kwargs.get("model")
-        if model is not None:
-            total_samples = len(self.eval_dataset)
-            device = next(model.parameters()).device
-            matches = 0
-
-            model.eval()
-            start_time = time.time()
-            for i, example in enumerate(self.eval_dataset, 1):
-                prompt, gold_sql = _extract_prompt_and_sql(example["text"])
-
-                inputs = self.tokenizer(prompt, return_tensors="pt")
-                inputs = {name: tensor.to(device) for name, tensor in inputs.items()}
-
-                with torch.inference_mode():
-                    output_ids = model.generate(
-                        **inputs,
-                        max_new_tokens=self.exact_match_max_new_tokens,
-                        do_sample=False,
-                        temperature=0.0,
-                        pad_token_id=self.tokenizer.eos_token_id,
-                        eos_token_id=self.tokenizer.eos_token_id,
-                    )
-
-                predicted_sql = self.tokenizer.decode(
-                    output_ids[0][inputs["input_ids"].shape[1]:],
-                    skip_special_tokens=True
-                )
-
-                match = _normalize_sql_for_exact_match(predicted_sql) == _normalize_sql_for_exact_match(gold_sql)
-                if match:
-                    matches += 1
-
-                # Speed and ETA
-                elapsed = time.time() - start_time
-                samples_per_sec = i / elapsed if elapsed > 0 else 0
-                remaining = total_samples - i
-                eta_seconds = remaining / samples_per_sec if samples_per_sec > 0 else 0
-                eta_str = self._format_eta(eta_seconds)
-
-                # Live per-sample output
-                icon = "✅" if match else "❌"
-                display_sql = predicted_sql.replace("\n", " ").strip()
-                if len(display_sql) > 50:
-                    display_sql = display_sql[:47] + "..."
-                speed_str = f"{samples_per_sec:.1f} samp/s"
-                print(f"[{i:4d}/{total_samples}] {icon} {display_sql:<54} | {speed_str:<14} | ETA {eta_str}")
-
-            accuracy_pct = (matches / total_samples * 100) if total_samples > 0 else 0.0
-            print(f"\n  ✅ Final Exact Match: {matches}/{total_samples} ({accuracy_pct:.1f}%)\n")
-        else:
-            print("  ⚠️  No model available for final exact match evaluation.\n")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--model-id", default="codellama/CodeLlama-7b-Instruct-hf")
+    parser.add_argument("--model-id", default="deepseek-ai/deepseek-coder-6.7b-instruct")
     parser.add_argument("--spider-root", default="spider")
     parser.add_argument("--train-file", default=None)
     parser.add_argument("--validation-file", default=None)
     parser.add_argument("--converted-dir", default="converted_spider")
     parser.add_argument("--output-dir", default="artifacts/qlora_adapter")
 
-    # Increased to 512 to prevent truncation of Spider dataset schemas + queries
-    parser.add_argument("--max-seq-length", type=int, default=512)
+    parser.add_argument("--max-seq-length", type=int, default=1024)
     parser.add_argument("--num-train-epochs", type=float, default=1.0)
+    parser.add_argument("--max-schema-tables", type=int, default=8)
 
-    # unchanged training params
     parser.add_argument("--per-device-train-batch-size", type=int, default=1)
     parser.add_argument("--per-device-eval-batch-size", type=int, default=1)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=4)
     parser.add_argument("--learning-rate", type=float, default=2e-4)
 
+    parser.add_argument("--lora-r", type=int, default=16, help="LoRA rank (lower rank saves VRAM and avoids paging)")
+    parser.add_argument("--lora-alpha", type=int, default=32, help="LoRA alpha parameter")
+
     parser.add_argument("--logging-steps", type=int, default=10)
     parser.add_argument("--save-steps", type=int, default=500)
     parser.add_argument("--eval-steps", type=int, default=200)
 
-    # ✅ FIXED DEFAULT
-    parser.add_argument("--exact-match-max-new-tokens", type=int, default=128)
-
     args = parser.parse_args()
 
     if args.spider_root and not (args.train_file and args.validation_file):
-        train_path, val_path = convert_spider_dataset(args.spider_root, args.converted_dir)
+        train_path, val_path = convert_spider_dataset(
+            args.spider_root,
+            args.converted_dir,
+            max_schema_tables=args.max_schema_tables,
+        )
         args.train_file = str(train_path)
         args.validation_file = str(val_path)
 
@@ -257,11 +217,25 @@ def main() -> None:
 
     print(f"Loaded dataset: {len(dataset['train'])} train, {len(dataset['validation'])} val")
 
-    tokenizer = AutoTokenizer.from_pretrained(args.model_id, use_fast=True)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer = load_corrected_tokenizer(args.model_id)
+    tokenizer.padding_side = "right"
 
-    # ✅ 1. Enable 4-bit Quantization (QLoRA) to drastically reduce VRAM and speed up training
+    print("Pre-tokenizing datasets on the main thread to preserve tokenizer spaces...")
+    def tokenize_fn(examples):
+        return tokenizer(
+            examples["text"],
+            truncation=True,
+            max_length=args.max_seq_length,
+        )
+
+    tokenized_dataset = dataset.map(
+        tokenize_fn,
+        batched=True,
+        num_proc=None,
+        remove_columns=dataset["train"].column_names,
+    )
+
+    print("Using standard QLoRA setup...")
     quantization_config = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_quant_type="nf4",
@@ -269,27 +243,35 @@ def main() -> None:
         bnb_4bit_compute_dtype=torch.bfloat16,
     )
 
+    device_map = {"": 0} if torch.cuda.is_available() else "auto"
+
     model = AutoModelForCausalLM.from_pretrained(
         args.model_id,
         quantization_config=quantization_config,
-        device_map="auto",
-        torch_dtype=torch.bfloat16,
+        device_map=device_map,
+        dtype=torch.bfloat16,
+        attn_implementation="sdpa",
+    )
+    model.config.pad_token_id = tokenizer.pad_token_id
+    model.config.bos_token_id = tokenizer.bos_token_id
+    model.config.eos_token_id = tokenizer.eos_token_id
+    model.config.use_cache = False
+
+    model = prepare_model_for_kbit_training(
+        model,
+        use_gradient_checkpointing=True,
+        gradient_checkpointing_kwargs={"use_reentrant": False},
     )
 
-    # ✅ 2. Prepare model for k-bit training (required for LoRA/QLoRA)
-    model = prepare_model_for_kbit_training(model)
-
-    # ✅ 3. Add LoRA configuration
     lora_config = LoraConfig(
-        r=16,
-        lora_alpha=32,
+        r=args.lora_r,
+        lora_alpha=args.lora_alpha,
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
         lora_dropout=0.05,
         bias="none",
         task_type="CAUSAL_LM",
     )
 
-    # ✅ 4. Optimized SFTConfig for maximum training speed
     training_args = SFTConfig(
         output_dir=args.output_dir,
         num_train_epochs=args.num_train_epochs,
@@ -298,48 +280,47 @@ def main() -> None:
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         learning_rate=args.learning_rate,
         logging_steps=args.logging_steps,
-        save_steps=args.save_steps,
-        save_total_limit=2,
-        eval_strategy="steps",
-        eval_steps=args.eval_steps,
-        
-        # Speed & Memory Optimizations:
-        bf16=True,                                  # Use bfloat16 mixed precision (2x faster, stable on Ampere+)
-        gradient_checkpointing=True,                # Save VRAM (critical for 6GB GPUs like RTX 4050)
-        optim="paged_adamw_32bit",                  # Memory-efficient optimizer, prevents OOM spikes
-        dataloader_num_workers=0,                   # Set to 0 on Windows to avoid 'spawn' multiprocessing overhead/hangs
-        dataloader_pin_memory=False,                # Pin memory is less beneficial with num_workers=0 on Windows
-        max_length=args.max_seq_length,         # Prevent truncation warnings
-        dataset_text_field="text",                  # Required for SFTTrainer
-        packing=False,                              # Set to True if you want to pack multiple short sequences
+        save_strategy="no",
+        eval_strategy="epoch" if args.num_train_epochs >= 0.1 else "no",
+        bf16=True,
+        gradient_checkpointing=True,
+        gradient_checkpointing_kwargs={"use_reentrant": False},
+        optim="paged_adamw_8bit",
+        dataloader_num_workers=0,
+        dataloader_pin_memory=True,
+        max_length=args.max_seq_length,
+        packing=False,
+        torch_empty_cache_steps=1,
+    )
+
+    response_template = "### Response:\n"
+    collator = CompletionOnlyDataCollator(
+        response_template=response_template,
+        tokenizer=tokenizer,
+        pad_to_multiple_of=8,
     )
 
     trainer = SFTTrainer(
         model=model,
         args=training_args,
-        train_dataset=dataset["train"],
-        eval_dataset=dataset["validation"],
-        tokenizer=tokenizer,
-        peft_config=lora_config,                    # Apply LoRA config
+        train_dataset=tokenized_dataset["train"],
+        eval_dataset=tokenized_dataset["validation"],
+        processing_class=tokenizer,
+        peft_config=lora_config,
+        data_collator=collator,
     )
 
-    # Remove default PrinterCallback to suppress ugly HF dictionary logs
-    # Use try/except for backward compat with newer transformers versions
     try:
         trainer.pop_callback(PrinterCallback)
     except Exception:
         pass
 
-    trainer.add_callback(
-        TerminalAnalyticsCallback(
-            tokenizer,
-            dataset["validation"],
-            args.exact_match_max_new_tokens,
-            [],
-        )
-    )
+    trainer.add_callback(TerminalAnalyticsCallback())
 
     trainer.train()
+
+    print(f"\nSaving final model and tokenizer to {args.output_dir}...")
+    trainer.save_model(args.output_dir)
 
 
 if __name__ == "__main__":
