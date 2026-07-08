@@ -1,6 +1,6 @@
-# SQLSlave
+# SQLAgent
 
-You ask a question in plain English, describe your database tables and columns, and SQLSlave generates the SQL query for you. It uses a DeepSeek-Coder-6.7B-Instruct model fine-tuned on the Spider text-to-SQL dataset with QLoRA.
+You ask a question in plain English, describe your database tables and columns, and SQLAgent generates the SQL query for you. It uses a DeepSeek-Coder-6.7B-Instruct model fine-tuned on the Spider text-to-SQL dataset with QLoRA.
 
 ## Setup
 
